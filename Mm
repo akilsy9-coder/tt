@@ -1,0 +1,945 @@
+# namos_new.py - Restaurant Management System (Updated Version)
+from flask import Flask, render_template_string, request, redirect, flash, session
+from flask_sqlalchemy import SQLAlchemy
+from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import datetime, timedelta
+import json
+
+app = Flask(__name__)
+app.secret_key = 'namos-secret-key-2024-restaurant'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///namos.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+db = SQLAlchemy(app)
+
+# ============ MODELS ============
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(100), unique=True, nullable=False)
+    username = db.Column(db.String(50), unique=True, nullable=False)
+    password = db.Column(db.String(200), nullable=False)
+    full_name = db.Column(db.String(100))
+    department = db.Column(db.String(20))
+    role = db.Column(db.String(20), default='staff')
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class Room(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(50), unique=True, nullable=False)
+    password = db.Column(db.String(200))
+    description = db.Column(db.Text)
+    is_locked = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class RoomMember(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    room_id = db.Column(db.Integer, db.ForeignKey('room.id'), nullable=False)
+    is_admin = db.Column(db.Boolean, default=False)
+    joined_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class Message(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    room_id = db.Column(db.Integer, db.ForeignKey('room.id'))
+    content = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class Reservation(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    customer_name = db.Column(db.String(100), nullable=False)
+    customer_phone = db.Column(db.String(20), nullable=False)
+    table_number = db.Column(db.String(10), nullable=False)
+    persons = db.Column(db.Integer, nullable=False)
+    reservation_date = db.Column(db.Date, nullable=False)
+    reservation_time = db.Column(db.String(10), nullable=False)
+    status = db.Column(db.String(20), default='confirmed')
+    notes = db.Column(db.Text)
+    created_by = db.Column(db.Integer, db.ForeignKey('user.id'))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class Order(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    table_number = db.Column(db.String(10), nullable=False)
+    items = db.Column(db.Text, nullable=False)
+    department = db.Column(db.String(20), nullable=False)
+    status = db.Column(db.String(20), default='pending')
+    priority = db.Column(db.String(10), default='normal')
+    assigned_to = db.Column(db.Integer, db.ForeignKey('user.id'))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    completed_at = db.Column(db.DateTime)
+
+class Notification(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    title = db.Column(db.String(100), nullable=False)
+    message = db.Column(db.Text, nullable=False)
+    is_read = db.Column(db.Boolean, default=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+# ============ HTML TEMPLATE ============
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{title} - Namos Restaurant</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f8fafc; }
+        .navbar { background: white; padding: 1rem 2rem; box-shadow: 0 2px 10px rgba(0,0,0,0.1); position: fixed; width: 100%; top: 0; z-index: 1000; }
+        .nav-container { max-width: 1200px; margin: 0 auto; display: flex; justify-content: space-between; align-items: center; }
+        .logo { font-size: 1.5rem; font-weight: bold; color: #4f46e5; text-decoration: none; }
+        .nav-links { display: flex; gap: 1.5rem; align-items: center; }
+        .nav-link { color: #4b5563; text-decoration: none; padding: 0.5rem 1rem; border-radius: 0.5rem; transition: all 0.2s; }
+        .nav-link:hover { background: #f3f4f6; color: #111827; }
+        .container { max-width: 1200px; margin: 5rem auto 2rem; padding: 0 1rem; }
+        .card { background: white; border-radius: 0.75rem; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .btn { padding: 0.5rem 1rem; border-radius: 0.5rem; border: none; cursor: pointer; font-weight: 500; text-decoration: none; display: inline-flex; align-items: center; gap: 0.5rem; }
+        .btn-primary { background: #4f46e5; color: white; }
+        .btn-success { background: #10b981; color: white; }
+        .btn-danger { background: #ef4444; color: white; }
+        .btn-outline { background: white; border: 1px solid #d1d5db; color: #374151; }
+        .form-group { margin-bottom: 1rem; }
+        .form-label { display: block; margin-bottom: 0.5rem; font-weight: 500; color: #374151; }
+        .form-input { width: 100%; padding: 0.5rem 0.75rem; border: 1px solid #d1d5db; border-radius: 0.5rem; font-size: 1rem; }
+        .form-input:focus { outline: none; border-color: #4f46e5; ring: 2px; }
+        .alert { padding: 1rem; border-radius: 0.5rem; margin-bottom: 1rem; }
+        .alert-success { background: #d1fae5; color: #065f46; }
+        .alert-danger { background: #fee2e2; color: #991b1b; }
+        .rooms-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1.5rem; margin-top: 1rem; }
+        .room-card { background: white; border: 1px solid #e5e7eb; border-radius: 0.75rem; padding: 1.5rem; text-decoration: none; color: inherit; transition: all 0.2s; }
+        .room-card:hover { transform: translateY(-2px); box-shadow: 0 10px 25px rgba(0,0,0,0.1); }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+        .stat-card { background: white; padding: 1.5rem; border-radius: 0.75rem; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .stat-value { font-size: 2rem; font-weight: bold; color: #4f46e5; margin-bottom: 0.5rem; }
+        table { width: 100%; border-collapse: collapse; background: white; }
+        th, td { padding: 0.75rem 1rem; text-align: left; border-bottom: 1px solid #e5e7eb; }
+        th { background: #f9fafb; font-weight: 600; color: #374151; }
+        .badge { display: inline-block; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.875rem; font-weight: 500; }
+        .badge-success { background: #d1fae5; color: #065f46; }
+        .badge-warning { background: #fef3c7; color: #92400e; }
+        .badge-danger { background: #fee2e2; color: #991b1b; }
+        .message-container { max-height: 400px; overflow-y: auto; padding: 1rem; background: #f9fafb; border-radius: 0.5rem; margin-bottom: 1rem; }
+        .message { margin-bottom: 1rem; padding: 1rem; background: white; border-radius: 0.5rem; border-left: 4px solid #4f46e5; }
+        .user-avatar { width: 32px; height: 32px; border-radius: 50%; background: #4f46e5; color: white; display: flex; align-items: center; justify-content: center; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-container">
+            <a href="/" class="logo">🍽️ NAMOS</a>
+            <div class="nav-links">
+                {nav_links}
+            </div>
+        </div>
+    </nav>
+    
+    <div class="container">
+        {alerts}
+        {content}
+    </div>
+</body>
+</html>
+"""
+
+# ============ HELPER FUNCTIONS ============
+def render_page(title, content, alerts=""):
+    if 'user_id' in session:
+        user = User.query.get(session['user_id'])
+        username = user.username if user else "User"
+        nav_links = f"""
+            <a href="/dashboard" class="nav-link">🏠 Dashboard</a>
+            <a href="/rooms" class="nav-link">💬 Rooms</a>
+            <a href="/reservations" class="nav-link">📅 Reservations</a>
+            <a href="/orders" class="nav-link">📋 Orders</a>
+            <div class="user-avatar">{username[0].upper()}</div>
+            <a href="/logout" class="btn btn-outline">Logout</a>
+        """
+    else:
+        nav_links = """
+            <a href="/login" class="nav-link">Login</a>
+            <a href="/register" class="nav-link">Register</a>
+        """
+    
+    return HTML_TEMPLATE.format(
+        title=title,
+        nav_links=nav_links,
+        alerts=alerts,
+        content=content
+    )
+
+def get_stats():
+    today = datetime.now().date()
+    tomorrow = today + timedelta(days=1)
+    
+    stats = {
+        'today_reservations': Reservation.query.filter_by(reservation_date=today).count(),
+        'tomorrow_reservations': Reservation.query.filter_by(reservation_date=tomorrow).count(),
+        'active_orders': Order.query.filter(Order.status.in_(['pending', 'preparing'])).count(),
+        'urgent_orders': Order.query.filter_by(priority='urgent', status='pending').count(),
+        'total_staff': User.query.count(),
+        'active_rooms': Room.query.count()
+    }
+    return stats
+
+# ============ ROUTES ============
+@app.route('/')
+def home():
+    if 'user_id' in session:
+        return redirect('/dashboard')
+    
+    content = """
+    <div class="card" style="text-align: center; padding: 3rem;">
+        <h1 style="font-size: 2.5rem; margin-bottom: 1rem; color: #1f2937;">Welcome to Namos Restaurant</h1>
+        <p style="font-size: 1.125rem; color: #6b7280; margin-bottom: 2rem;">Complete restaurant management and communication system</p>
+        <div style="display: flex; gap: 1rem; justify-content: center;">
+            <a href="/login" class="btn btn-primary" style="padding: 0.75rem 2rem;">Login</a>
+            <a href="/register" class="btn btn-outline" style="padding: 0.75rem 2rem;">Register</a>
+        </div>
+    </div>
+    
+    <div class="card">
+        <h2 style="margin-bottom: 1rem; color: #1f2937;">Features</h2>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1.5rem;">
+            <div style="padding: 1rem; border: 1px solid #e5e7eb; border-radius: 0.5rem;">
+                <h3 style="color: #4f46e5; margin-bottom: 0.5rem;">💬 Real-time Chat</h3>
+                <p style="color: #6b7280;">Department-specific rooms for team communication</p>
+            </div>
+            <div style="padding: 1rem; border: 1px solid #e5e7eb; border-radius: 0.5rem;">
+                <h3 style="color: #10b981; margin-bottom: 0.5rem;">📅 Reservations</h3>
+                <p style="color: #6b7280;">Manage customer bookings and table assignments</p>
+            </div>
+            <div style="padding: 1rem; border: 1px solid #e5e7eb; border-radius: 0.5rem;">
+                <h3 style="color: #f59e0b; margin-bottom: 0.5rem;">📋 Order Management</h3>
+                <p style="color: #6b7280;">Track kitchen and bar orders with priorities</p>
+            </div>
+            <div style="padding: 1rem; border: 1px solid #e5e7eb; border-radius: 0.5rem;">
+                <h3 style="color: #8b5cf6; margin-bottom: 0.5rem;">📊 Dashboard</h3>
+                <p style="color: #6b7280;">Real-time statistics and activity monitoring</p>
+            </div>
+        </div>
+    </div>
+    """
+    return render_page("Home", content)
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        email = request.form.get('email')
+        password = request.form.get('password')
+        
+        user = User.query.filter_by(email=email).first()
+        
+        if user and check_password_hash(user.password, password):
+            if not user.is_active:
+                flash("Account is deactivated", "danger")
+                return redirect('/login')
+            
+            session['user_id'] = user.id
+            session['username'] = user.username
+            session['department'] = user.department
+            session['role'] = user.role
+            
+            flash("Login successful!", "success")
+            return redirect('/dashboard')
+        else:
+            flash("Invalid email or password", "danger")
+    
+    alerts = ""
+    if session.get('_flashes'):
+        for category, message in session['_flashes']:
+            alerts += f'<div class="alert alert-{category}">{message}</div>'
+    
+    content = """
+    <div class="card" style="max-width: 400px; margin: 0 auto;">
+        <h2 style="margin-bottom: 1.5rem; text-align: center;">Login</h2>
+        <form method="POST">
+            <div class="form-group">
+                <label class="form-label">Email</label>
+                <input type="email" name="email" class="form-input" placeholder="Enter your email" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Password</label>
+                <input type="password" name="password" class="form-input" placeholder="Enter your password" required>
+            </div>
+            <button type="submit" class="btn btn-primary" style="width: 100%; margin-top: 1rem;">Login</button>
+        </form>
+        <div style="text-align: center; margin-top: 1.5rem;">
+            <p style="color: #6b7280;">Don't have an account? <a href="/register" style="color: #4f46e5;">Register</a></p>
+        </div>
+        <div style="margin-top: 2rem; padding: 1rem; background: #f9fafb; border-radius: 0.5rem;">
+            <h3 style="margin-bottom: 0.75rem; font-size: 0.875rem; color: #6b7280;">Test Accounts:</h3>
+            <div style="font-size: 0.875rem;">
+                <p><strong>Admin:</strong> admin@namos.com / admin123</p>
+                <p><strong>Kitchen:</strong> kitchen@namos.com / kitchen123</p>
+                <p><strong>Bar:</strong> bar@namos.com / bar123</p>
+                <p><strong>Service:</strong> service@namos.com / service123</p>
+            </div>
+        </div>
+    </div>
+    """
+    return render_page("Login", content, alerts)
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        email = request.form.get('email')
+        username = request.form.get('username')
+        password = request.form.get('password')
+        full_name = request.form.get('full_name')
+        department = request.form.get('department')
+        
+        if User.query.filter_by(email=email).first():
+            flash("Email already registered", "danger")
+            return redirect('/register')
+        
+        if User.query.filter_by(username=username).first():
+            flash("Username already taken", "danger")
+            return redirect('/register')
+        
+        user = User(
+            email=email,
+            username=username,
+            password=generate_password_hash(password),
+            full_name=full_name,
+            department=department,
+            role='staff'
+        )
+        
+        db.session.add(user)
+        db.session.commit()
+        
+        flash("Registration successful! Please login.", "success")
+        return redirect('/login')
+    
+    content = """
+    <div class="card" style="max-width: 400px; margin: 0 auto;">
+        <h2 style="margin-bottom: 1.5rem; text-align: center;">Register</h2>
+        <form method="POST">
+            <div class="form-group">
+                <label class="form-label">Full Name</label>
+                <input type="text" name="full_name" class="form-input" placeholder="Enter your full name" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Username</label>
+                <input type="text" name="username" class="form-input" placeholder="Choose a username" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Email</label>
+                <input type="email" name="email" class="form-input" placeholder="Enter your email" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Password</label>
+                <input type="password" name="password" class="form-input" placeholder="Create a password" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Department</label>
+                <select name="department" class="form-input" required>
+                    <option value="">Select Department</option>
+                    <option value="bar">Bar</option>
+                    <option value="kitchen">Kitchen</option>
+                    <option value="service">Service</option>
+                    <option value="admin">Admin</option>
+                </select>
+            </div>
+            <button type="submit" class="btn btn-primary" style="width: 100%; margin-top: 1rem;">Register</button>
+        </form>
+        <div style="text-align: center; margin-top: 1.5rem;">
+            <p style="color: #6b7280;">Already have an account? <a href="/login" style="color: #4f46e5;">Login</a></p>
+        </div>
+    </div>
+    """
+    return render_page("Register", content)
+
+@app.route('/dashboard')
+def dashboard():
+    if 'user_id' not in session:
+        return redirect('/login')
+    
+    user = User.query.get(session['user_id'])
+    stats = get_stats()
+    
+    # Today's reservations
+    today = datetime.now().date()
+    today_reservations = Reservation.query.filter_by(reservation_date=today).order_by(Reservation.reservation_time).limit(5).all()
+    
+    # Active orders
+    active_orders = Order.query.filter(Order.status.in_(['pending', 'preparing'])).order_by(Order.created_at.desc()).limit(5).all()
+    
+    content = f"""
+    <div class="card" style="background: linear-gradient(135deg, #4f46e5, #7c3aed); color: white;">
+        <h1 style="margin-bottom: 0.5rem;">Welcome back, {user.full_name or user.username}! 👋</h1>
+        <p style="opacity: 0.9;">Here's what's happening in your restaurant today.</p>
+    </div>
+    
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-value">{stats['today_reservations']}</div>
+            <div style="color: #6b7280;">Today's Reservations</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{stats['tomorrow_reservations']}</div>
+            <div style="color: #6b7280;">Tomorrow's Reservations</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{stats['active_orders']}</div>
+            <div style="color: #6b7280;">Active Orders</div>
+            <div style="font-size: 0.875rem; color: #f59e0b; margin-top: 0.5rem;">
+                {stats['urgent_orders']} urgent
+            </div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{stats['total_staff']}</div>
+            <div style="color: #6b7280;">Total Staff</div>
+        </div>
+    </div>
+    
+    <div class="card">
+        <h2 style="margin-bottom: 1rem;">Quick Actions</h2>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem;">
+            <a href="/reservations/new" class="btn btn-primary">➕ New Reservation</a>
+            <a href="/orders/new" class="btn btn-success">📋 Create Order</a>
+            <a href="/rooms" class="btn btn-outline">💬 Join Room</a>
+            <a href="/reservations" class="btn btn-outline">📅 View Reservations</a>
+        </div>
+    </div>
+    
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;">
+        <div class="card">
+            <h3 style="margin-bottom: 1rem;">Today's Reservations</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Customer</th>
+                        <th>Time</th>
+                        <th>Table</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {"".join([f'''
+                    <tr>
+                        <td>{r.customer_name}</td>
+                        <td>{r.reservation_time}</td>
+                        <td>{r.table_number}</td>
+                        <td><span class="badge badge-success">{r.status}</span></td>
+                    </tr>
+                    ''' for r in today_reservations])}
+                </tbody>
+            </table>
+            <a href="/reservations" class="btn btn-outline" style="width: 100%; margin-top: 1rem;">View All</a>
+        </div>
+        
+        <div class="card">
+            <h3 style="margin-bottom: 1rem;">Active Orders</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Table</th>
+                        <th>Department</th>
+                        <th>Priority</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {"".join([f'''
+                    <tr>
+                        <td>{o.table_number}</td>
+                        <td>{o.department}</td>
+                        <td><span class="badge {'badge-danger' if o.priority == 'urgent' else 'badge-warning'}">{o.priority}</span></td>
+                        <td><span class="badge badge-warning">{o.status}</span></td>
+                    </tr>
+                    ''' for o in active_orders])}
+                </tbody>
+            </table>
+            <a href="/orders" class="btn btn-outline" style="width: 100%; margin-top: 1rem;">View All</a>
+        </div>
+    </div>
+    """
+    return render_page("Dashboard", content)
+
+@app.route('/rooms')
+def rooms():
+    if 'user_id' not in session:
+        return redirect('/login')
+    
+    all_rooms = Room.query.all()
+    room_members = {}
+    for room in all_rooms:
+        room_members[room.id] = RoomMember.query.filter_by(room_id=room.id).count()
+    
+    rooms_html = ""
+    for room in all_rooms:
+        member_count = room_members[room.id]
+        icon = "🍸" if room.name.lower() == "bar" else "👨‍🍳" if room.name.lower() == "kitchen" else "💁" if room.name.lower() == "service" else "👑" if room.name.lower() == "admin" else "🌍"
+        rooms_html += f"""
+        <a href="/room/{room.name.lower()}" class="room-card">
+            <div style="font-size: 2rem; margin-bottom: 0.5rem;">{icon}</div>
+            <h3 style="margin-bottom: 0.5rem;">{room.name} Room</h3>
+            <p style="color: #6b7280; margin-bottom: 1rem;">{room.description or 'Department communication room'}</p>
+            <div style="display: flex; justify-content: space-between; color: #6b7280; font-size: 0.875rem;">
+                <span>{"🔒 Locked" if room.is_locked else "🔓 Open"}</span>
+                <span>👥 {member_count} members</span>
+            </div>
+        </a>
+        """
+    
+    content = f"""
+    <div class="card">
+        <h1 style="margin-bottom: 0.5rem;">Rooms</h1>
+        <p style="color: #6b7280; margin-bottom: 1.5rem;">Join department rooms to collaborate with your team</p>
+        
+        <div class="rooms-grid">
+            {rooms_html}
+        </div>
+    </div>
+    """
+    return render_page("Rooms", content)
+
+@app.route('/room/<room_name>')
+def room_chat(room_name):
+    if 'user_id' not in session:
+        return redirect('/login')
+    
+    room = Room.query.filter_by(name=room_name.capitalize()).first()
+    if not room:
+        flash("Room not found", "danger")
+        return redirect('/rooms')
+    
+    # Check if member
+    is_member = RoomMember.query.filter_by(user_id=session['user_id'], room_id=room.id).first()
+    
+    if not is_member:
+        if room.is_locked:
+            flash("Room is locked. Contact admin for access.", "danger")
+            return redirect('/rooms')
+        # Auto-join if not locked
+        member = RoomMember(user_id=session['user_id'], room_id=room.id)
+        db.session.add(member)
+        db.session.commit()
+    
+    # Get messages
+    messages = Message.query.filter_by(room_id=room.id).order_by(Message.created_at).limit(50).all()
+    
+    messages_html = ""
+    for msg in messages:
+        user = User.query.get(msg.user_id)
+        time = msg.created_at.strftime("%H:%M")
+        messages_html += f"""
+        <div class="message">
+            <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
+                <strong>{user.username if user else 'Unknown'}</strong>
+                <small style="color: #6b7280;">{time}</small>
+            </div>
+            <div>{msg.content}</div>
+        </div>
+        """
+    
+    content = f"""
+    <div class="card">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+            <div>
+                <h2 style="margin-bottom: 0.25rem;">{room.name} Room</h2>
+                <p style="color: #6b7280;">{room.description or 'Department communication'}</p>
+            </div>
+            <a href="/rooms" class="btn btn-outline">← Back to Rooms</a>
+        </div>
+        
+        <div class="message-container">
+            {messages_html if messages_html else '<p style="text-align: center; color: #6b7280;">No messages yet. Start the conversation!</p>'}
+        </div>
+        
+        <form method="POST" action="/room/{room_name}/message">
+            <div style="display: flex; gap: 0.5rem;">
+                <input type="text" name="message" class="form-input" placeholder="Type your message..." required>
+                <button type="submit" class="btn btn-primary">Send</button>
+            </div>
+        </form>
+    </div>
+    """
+    return render_page(f"{room.name} Room", content)
+
+@app.route('/room/<room_name>/message', methods=['POST'])
+def send_message(room_name):
+    if 'user_id' not in session:
+        return redirect('/login')
+    
+    room = Room.query.filter_by(name=room_name.capitalize()).first()
+    if not room:
+        return redirect('/rooms')
+    
+    message_content = request.form.get('message')
+    if message_content:
+        message = Message(
+            user_id=session['user_id'],
+            room_id=room.id,
+            content=message_content
+        )
+        db.session.add(message)
+        db.session.commit()
+    
+    return redirect(f'/room/{room_name}')
+
+@app.route('/reservations')
+def reservations():
+    if 'user_id' not in session:
+        return redirect('/login')
+    
+    all_reservations = Reservation.query.order_by(Reservation.reservation_date.desc()).all()
+    
+    rows = ""
+    for res in all_reservations:
+        badge_class = "badge-success" if res.status == "confirmed" else "badge-danger"
+        rows += f"""
+        <tr>
+            <td>#{res.id}</td>
+            <td>{res.customer_name}</td>
+            <td>{res.customer_phone}</td>
+            <td>{res.table_number}</td>
+            <td>{res.reservation_date}</td>
+            <td>{res.reservation_time}</td>
+            <td>{res.persons}</td>
+            <td><span class="badge {badge_class}">{res.status}</span></td>
+            <td>
+                <a href="/reservations/{res.id}/cancel" class="btn btn-danger" style="padding: 0.25rem 0.5rem; font-size: 0.875rem;">
+                    Cancel
+                </a>
+            </td>
+        </tr>
+        """
+    
+    content = f"""
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+        <h1>Reservations</h1>
+        <a href="/reservations/new" class="btn btn-success">➕ New Reservation</a>
+    </div>
+    
+    <div class="card">
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Customer</th>
+                    <th>Phone</th>
+                    <th>Table</th>
+                    <th>Date</th>
+                    <th>Time</th>
+                    <th>Persons</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rows}
+            </tbody>
+        </table>
+    </div>
+    """
+    return render_page("Reservations", content)
+
+@app.route('/reservations/new', methods=['GET', 'POST'])
+def new_reservation():
+    if 'user_id' not in session:
+        return redirect('/login')
+    
+    if request.method == 'POST':
+        reservation = Reservation(
+            customer_name=request.form.get('customer_name'),
+            customer_phone=request.form.get('customer_phone'),
+            table_number=request.form.get('table_number'),
+            persons=int(request.form.get('persons')),
+            reservation_date=datetime.strptime(request.form.get('date'), '%Y-%m-%d').date(),
+            reservation_time=request.form.get('time'),
+            notes=request.form.get('notes'),
+            created_by=session['user_id']
+        )
+        
+        db.session.add(reservation)
+        db.session.commit()
+        
+        flash("Reservation created successfully!", "success")
+        return redirect('/reservations')
+    
+    content = """
+    <div class="card" style="max-width: 500px; margin: 0 auto;">
+        <h2 style="margin-bottom: 1.5rem;">New Reservation</h2>
+        <form method="POST">
+            <div class="form-group">
+                <label class="form-label">Customer Name</label>
+                <input type="text" name="customer_name" class="form-input" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Phone Number</label>
+                <input type="tel" name="customer_phone" class="form-input" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Table Number</label>
+                <input type="text" name="table_number" class="form-input" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Number of Persons</label>
+                <input type="number" name="persons" class="form-input" min="1" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Date</label>
+                <input type="date" name="date" class="form-input" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Time</label>
+                <input type="time" name="time" class="form-input" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Notes (Optional)</label>
+                <textarea name="notes" class="form-input" rows="3"></textarea>
+            </div>
+            <div style="display: flex; gap: 0.5rem; margin-top: 1.5rem;">
+                <button type="submit" class="btn btn-primary">Create Reservation</button>
+                <a href="/reservations" class="btn btn-outline">Cancel</a>
+            </div>
+        </form>
+    </div>
+    """
+    return render_page("New Reservation", content)
+
+@app.route('/reservations/<int:id>/cancel')
+def cancel_reservation(id):
+    if 'user_id' not in session:
+        return redirect('/login')
+    
+    reservation = Reservation.query.get(id)
+    if reservation:
+        reservation.status = 'cancelled'
+        db.session.commit()
+        flash("Reservation cancelled", "success")
+    
+    return redirect('/reservations')
+
+@app.route('/orders')
+def orders():
+    if 'user_id' not in session:
+        return redirect('/login')
+    
+    user = User.query.get(session['user_id'])
+    if user.role == 'admin':
+        orders_list = Order.query.order_by(Order.created_at.desc()).all()
+    else:
+        orders_list = Order.query.filter_by(department=user.department).order_by(Order.created_at.desc()).all()
+    
+    rows = ""
+    for order in orders_list:
+        priority_class = "badge-danger" if order.priority == "urgent" else "badge-warning" if order.priority == "high" else "badge-success"
+        status_class = "badge-warning" if order.status == "pending" else "badge-warning" if order.status == "preparing" else "badge-success"
+        
+        rows += f"""
+        <tr>
+            <td>#{order.id}</td>
+            <td>{order.table_number}</td>
+            <td>{order.items[:50]}{'...' if len(order.items) > 50 else ''}</td>
+            <td>{order.department}</td>
+            <td><span class="badge {priority_class}">{order.priority}</span></td>
+            <td><span class="badge {status_class}">{order.status}</span></td>
+            <td>{order.created_at.strftime('%H:%M')}</td>
+            <td>
+                <a href="/orders/{order.id}/complete" class="btn btn-success" style="padding: 0.25rem 0.5rem; font-size: 0.875rem;">
+                    Complete
+                </a>
+            </td>
+        </tr>
+        """
+    
+    content = f"""
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+        <h1>Orders ({user.department.capitalize() if user.department else 'All'})</h1>
+        <a href="/orders/new" class="btn btn-success">📋 New Order</a>
+    </div>
+    
+    <div class="card">
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Table</th>
+                    <th>Items</th>
+                    <th>Department</th>
+                    <th>Priority</th>
+                    <th>Status</th>
+                    <th>Created</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rows}
+            </tbody>
+        </table>
+    </div>
+    """
+    return render_page("Orders", content)
+
+@app.route('/orders/new', methods=['GET', 'POST'])
+def new_order():
+    if 'user_id' not in session:
+        return redirect('/login')
+    
+    if request.method == 'POST':
+        order = Order(
+            table_number=request.form.get('table_number'),
+            items=request.form.get('items'),
+            department=request.form.get('department'),
+            priority=request.form.get('priority'),
+            assigned_to=session['user_id'] if request.form.get('assign_to_me') else None
+        )
+        
+        db.session.add(order)
+        db.session.commit()
+        
+        flash("Order created successfully!", "success")
+        return redirect('/orders')
+    
+    user = User.query.get(session['user_id'])
+    
+    content = f"""
+    <div class="card" style="max-width: 500px; margin: 0 auto;">
+        <h2 style="margin-bottom: 1.5rem;">New Order</h2>
+        <form method="POST">
+            <div class="form-group">
+                <label class="form-label">Table Number</label>
+                <input type="text" name="table_number" class="form-input" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Order Items</label>
+                <textarea name="items" class="form-input" rows="4" placeholder="Enter each item on a new line" required></textarea>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Department</label>
+                <select name="department" class="form-input" required>
+                    <option value="">Select Department</option>
+                    <option value="kitchen">Kitchen</option>
+                    <option value="bar">Bar</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Priority</label>
+                <select name="priority" class="form-input" required>
+                    <option value="normal">Normal</option>
+                    <option value="high">High</option>
+                    <option value="urgent">Urgent</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label style="display: flex; align-items: center; gap: 0.5rem;">
+                    <input type="checkbox" name="assign_to_me">
+                    Assign to me ({user.username})
+                </label>
+            </div>
+            <div style="display: flex; gap: 0.5rem; margin-top: 1.5rem;">
+                <button type="submit" class="btn btn-primary">Create Order</button>
+                <a href="/orders" class="btn btn-outline">Cancel</a>
+            </div>
+        </form>
+    </div>
+    """
+    return render_page("New Order", content)
+
+@app.route('/orders/<int:id>/complete')
+def complete_order(id):
+    if 'user_id' not in session:
+        return redirect('/login')
+    
+    order = Order.query.get(id)
+    if order:
+        order.status = 'completed'
+        order.completed_at = datetime.utcnow()
+        db.session.commit()
+        flash("Order marked as completed", "success")
+    
+    return redirect('/orders')
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    flash("Logged out successfully", "success")
+    return redirect('/login')
+
+# ============ INITIALIZATION ============
+def init_database():
+    with app.app_context():
+        # Create all tables
+        db.create_all()
+        
+        # Create default rooms
+        default_rooms = [
+            {'name': 'Bar', 'password': 'bar123', 'description': 'Bar staff communication room', 'locked': True},
+            {'name': 'Kitchen', 'password': 'kitchen123', 'description': 'Kitchen staff communication room', 'locked': True},
+            {'name': 'Service', 'password': 'service123', 'description': 'Service staff communication room', 'locked': True},
+            {'name': 'Admin', 'password': 'admin123', 'description': 'Administration room', 'locked': True},
+            {'name': 'Public', 'password': None, 'description': 'General discussion room', 'locked': False}
+        ]
+        
+        for room_data in default_rooms:
+            if not Room.query.filter_by(name=room_data['name']).first():
+                room = Room(
+                    name=room_data['name'],
+                    password=generate_password_hash(room_data['password']) if room_data['password'] else None,
+                    description=room_data['description'],
+                    is_locked=room_data['locked']
+                )
+                db.session.add(room)
+        
+        # Create default users
+        default_users = [
+            {'email': 'admin@namos.com', 'username': 'admin', 'password': 'admin123', 
+             'full_name': 'Admin User', 'department': 'admin', 'role': 'admin'},
+            {'email': 'kitchen@namos.com', 'username': 'chef', 'password': 'kitchen123',
+             'full_name': 'Kitchen Chef', 'department': 'kitchen', 'role': 'staff'},
+            {'email': 'bar@namos.com', 'username': 'bartender', 'password': 'bar123',
+             'full_name': 'Bar Staff', 'department': 'bar', 'role': 'staff'},
+            {'email': 'service@namos.com', 'username': 'waiter', 'password': 'service123',
+             'full_name': 'Service Staff', 'department': 'service', 'role': 'staff'}
+        ]
+        
+        for user_data in default_users:
+            if not User.query.filter_by(email=user_data['email']).first():
+                user = User(
+                    email=user_data['email'],
+                    username=user_data['username'],
+                    password=generate_password_hash(user_data['password']),
+                    full_name=user_data['full_name'],
+                    department=user_data['department'],
+                    role=user_data['role']
+                )
+                db.session.add(user)
+        
+        db.session.commit()
+        print("✅ Database initialized successfully!")
+
+# ============ FLASH MESSAGES ============
+def flash(message, category):
+    if '_flashes' not in session:
+        session['_flashes'] = []
+    session['_flashes'].append((category, message))
+
+# ============ RUN APPLICATION ============
+if __name__ == '__main__':
+    init_database()
+    
+    print("\n" + "="*60)
+    print("🚀 NAMOS RESTAURANT MANAGEMENT SYSTEM")
+    print("="*60)
+    print("📡 Server: http://localhost:5000")
+    print("\n🔑 TEST ACCOUNTS:")
+    print("   👑 Admin:    admin@namos.com / admin123")
+    print("   👨‍🍳 Kitchen: kitchen@namos.com / kitchen123")
+    print("   🍸 Bar:      bar@namos.com / bar123")
+    print("   💁 Service:  service@namos.com / service123")
+    print("\n🔐 ROOM PASSWORDS:")
+    print("   Bar Room: bar123")
+    print("   Kitchen Room: kitchen123")
+    print("   Service Room: service123")
+    print("   Admin Room: admin123")
+    print("   Public Room: no password")
+    print("="*60)
+    
+    app.run(debug=True, host='0.0.0.0', port=5000)
